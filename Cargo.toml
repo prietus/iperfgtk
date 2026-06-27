@@ -1,0 +1,19 @@
+[package]
+name = "iperf_rust"
+version = "0.1.0"
+edition = "2021"
+description = "Frontend gráfico moderno para iperf3 (GTK4 + libadwaita)"
+license = "MIT"
+
+[dependencies]
+gtk = { version = "0.9", package = "gtk4", features = ["v4_10"] }
+adw = { version = "0.7", package = "libadwaita", features = ["v1_4"] }
+glib = "0.20"
+async-channel = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true

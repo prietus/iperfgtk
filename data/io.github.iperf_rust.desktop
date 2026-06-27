@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=iperf3 GUI
+Comment=Frontend gráfico para iperf3 con VU-meter
+Exec=iperf_rust
+Icon=io.github.iperf_rust
+Terminal=false
+Categories=Network;Utility;GTK;
+Keywords=iperf;iperf3;network;bandwidth;speed;throughput;
