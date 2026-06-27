@@ -1,0 +1,43 @@
+# Maintainer: teraflops <cprieto.ortiz@gmail.com>
+
+pkgname=iperfgtk-bin
+_pkgname=iperfgtk
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Modern native GTK4/libadwaita frontend for iperf3 with an analog VU-meter (prebuilt binary)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/prietus/iperfgtk"
+license=('MIT')
+depends=('gtk4' 'libadwaita' 'iperf3' 'gcc-libs' 'glibc')
+provides=("${_pkgname}=${pkgver}")
+conflicts=("${_pkgname}")
+
+# Tarball del código fuente en la etiqueta: aporta el .desktop, los iconos y la
+# licencia (que no van en los artefactos de la Release).
+source=("${_pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+# Binarios precompilados publicados por el workflow de CI en la Release.
+source_x86_64=("iperf_rust-${pkgver}-x86_64::${url}/releases/download/v${pkgver}/iperf_rust-linux-x86_64")
+source_aarch64=("iperf_rust-${pkgver}-aarch64::${url}/releases/download/v${pkgver}/iperf_rust-linux-arm64")
+
+# Ejecuta `updpkgsums` en Arch para rellenar estos hashes antes de publicar.
+sha256sums=('SKIP')
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  # Binario precompilado correspondiente a la arquitectura actual.
+  install -Dm755 "$srcdir/iperf_rust-${pkgver}-${CARCH}" "$pkgdir/usr/bin/iperf_rust"
+
+  # Archivos de integración con el escritorio desde el árbol de fuentes.
+  cd "$srcdir/${_pkgname}-${pkgver}"
+
+  install -Dm644 "data/io.github.iperf_rust.desktop" \
+    "$pkgdir/usr/share/applications/io.github.iperf_rust.desktop"
+
+  for s in 16 32 48 64 128 256 512; do
+    install -Dm644 "data/icons/hicolor/${s}x${s}/apps/io.github.iperf_rust.png" \
+      "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/io.github.iperf_rust.png"
+  done
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
