@@ -63,11 +63,16 @@ fn entry_row(title: &str) -> adw::EntryRow {
 }
 
 fn build_client_page() -> gtk::Widget {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    root.set_margin_top(16);
-    root.set_margin_bottom(16);
-    root.set_margin_start(16);
-    root.set_margin_end(16);
+    // Outer box: scrollable form on top, pinned meter + controls at the bottom.
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+    // The form lives inside a ScrolledWindow so the window never grows past the
+    // screen; options scroll while the gauge and Start button stay visible.
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    form.set_margin_top(16);
+    form.set_margin_bottom(16);
+    form.set_margin_start(16);
+    form.set_margin_end(16);
 
     // --- Connection ---
     let group = adw::PreferencesGroup::new();
@@ -81,7 +86,7 @@ fn build_client_page() -> gtk::Widget {
     group.add(&host_row);
     group.add(&port_row);
     group.add(&dur_row);
-    root.append(&group);
+    form.append(&group);
 
     // --- Test options ---
     let test_group = adw::PreferencesGroup::new();
@@ -113,7 +118,7 @@ fn build_client_page() -> gtk::Widget {
     test_group.add(&udp_row);
     test_group.add(&bitrate_row);
     test_group.add(&omit_row);
-    root.append(&test_group);
+    form.append(&test_group);
 
     // --- Advanced (collapsible) ---
     let adv_group = adw::PreferencesGroup::new();
@@ -154,28 +159,41 @@ fn build_client_page() -> gtk::Widget {
     advanced.add_row(&nodelay_row);
     advanced.add_row(&zerocopy_row);
     adv_group.add(&advanced);
-    root.append(&adv_group);
+    form.append(&adv_group);
 
-    // --- VU-meter ---
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&form)
+        .build();
+    root.append(&scrolled);
+
+    // --- Pinned bottom area: VU-meter + status + button ---
+    let bottom = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    bottom.set_margin_top(8);
+    bottom.set_margin_bottom(16);
+    bottom.set_margin_start(16);
+    bottom.set_margin_end(16);
+
     let vu = VuMeter::new();
     let frame = gtk::Frame::new(None);
     frame.add_css_class("card");
     frame.set_child(Some(vu.widget()));
-    frame.set_vexpand(true);
-    root.append(&frame);
+    bottom.append(&frame);
 
-    // --- Status + button ---
     let status = gtk::Label::new(Some("Ready."));
     status.add_css_class("dim-label");
     status.set_wrap(true);
     status.set_xalign(0.0);
-    root.append(&status);
+    bottom.append(&status);
 
     let start_btn = gtk::Button::with_label("Start test");
     start_btn.add_css_class("suggested-action");
     start_btn.add_css_class("pill");
     start_btn.set_halign(gtk::Align::Center);
-    root.append(&start_btn);
+    bottom.append(&start_btn);
+
+    root.append(&bottom);
 
     // --- Shared state ---
     let session: Rc<RefCell<Option<Session>>> = Rc::new(RefCell::new(None));
@@ -269,11 +287,13 @@ fn build_client_page() -> gtk::Widget {
 }
 
 fn build_server_page() -> gtk::Widget {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    root.set_margin_top(16);
-    root.set_margin_bottom(16);
-    root.set_margin_start(16);
-    root.set_margin_end(16);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    form.set_margin_top(16);
+    form.set_margin_bottom(16);
+    form.set_margin_start(16);
+    form.set_margin_end(16);
 
     let group = adw::PreferencesGroup::new();
     group.set_title("Server");
@@ -287,26 +307,40 @@ fn build_server_page() -> gtk::Widget {
     group.add(&port_row);
     group.add(&bind_row);
     group.add(&oneoff_row);
-    root.append(&group);
+    form.append(&group);
+
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&form)
+        .build();
+    root.append(&scrolled);
+
+    let bottom = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    bottom.set_margin_top(8);
+    bottom.set_margin_bottom(16);
+    bottom.set_margin_start(16);
+    bottom.set_margin_end(16);
 
     let vu = VuMeter::new();
     let frame = gtk::Frame::new(None);
     frame.add_css_class("card");
     frame.set_child(Some(vu.widget()));
-    frame.set_vexpand(true);
-    root.append(&frame);
+    bottom.append(&frame);
 
     let status = gtk::Label::new(Some("Stopped."));
     status.add_css_class("dim-label");
     status.set_wrap(true);
     status.set_xalign(0.0);
-    root.append(&status);
+    bottom.append(&status);
 
     let start_btn = gtk::Button::with_label("Start server");
     start_btn.add_css_class("suggested-action");
     start_btn.add_css_class("pill");
     start_btn.set_halign(gtk::Align::Center);
-    root.append(&start_btn);
+    bottom.append(&start_btn);
+
+    root.append(&bottom);
 
     let session: Rc<RefCell<Option<Session>>> = Rc::new(RefCell::new(None));
 
