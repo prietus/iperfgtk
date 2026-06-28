@@ -33,6 +33,14 @@ pub enum Event {
     Finished(i32),
 }
 
+/// IP version preference (general option, `-4`/`-6`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpVersion {
+    Auto,
+    V4,
+    V6,
+}
+
 /// Client configuration for a test.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -42,14 +50,41 @@ pub struct ClientConfig {
     pub parallel: u32,
     /// `true` = reverse (descarga: el servidor envía hacia nosotros).
     pub reverse: bool,
+    /// `true` = bidireccional (`--bidir`): mide en ambos sentidos a la vez.
+    pub bidir: bool,
     /// `true` = UDP en lugar de TCP.
     pub udp: bool,
+    /// Bitrate objetivo (`-b`), p.ej. "10M", "0" (sin límite). Vacío = por
+    /// defecto de iperf3 (ilimitado en TCP; en UDP forzamos `-b 0`).
+    pub bitrate: String,
+    /// Omite los primeros N segundos de los resultados (`-O`). 0 = ninguno.
+    pub omit: u32,
+    /// Preferencia de versión de IP.
+    pub ip_version: IpVersion,
+    /// Dirección/interfaz local a la que enlazar (`-B`). Vacío = ninguna.
+    pub bind: String,
+    /// Tamaño de ventana TCP / buffer de socket (`-w`), p.ej. "256K". Vacío = ninguno.
+    pub window: String,
+    /// Longitud del buffer de lectura/escritura (`-l`), p.ej. "128K". Vacío = ninguno.
+    pub length: String,
+    /// MSS de TCP (`-M`). 0 = ninguno.
+    pub mss: u32,
+    /// Algoritmo de control de congestión TCP (`-C`). Vacío = ninguno.
+    pub congestion: String,
+    /// Desactiva el algoritmo de Nagle (`-N`).
+    pub no_delay: bool,
+    /// Envío con zero-copy (`-Z`).
+    pub zerocopy: bool,
 }
 
 /// Server mode configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
+    /// Dirección/interfaz local a la que enlazar (`-B`). Vacío = ninguna.
+    pub bind: String,
+    /// Atiende un único cliente y termina (`-1`).
+    pub one_off: bool,
 }
 
 /// Test session in progress. On `drop` or `stop()` the iperf3 subprocess is killed.
@@ -92,21 +127,71 @@ pub fn run_client(cfg: ClientConfig) -> (Session, async_channel::Receiver<Event>
         args.push("-P".into());
         args.push(cfg.parallel.to_string());
     }
-    if cfg.reverse {
+    // `--bidir` y `-R` son excluyentes; si el usuario pide bidireccional,
+    // ignoramos reverse.
+    if cfg.bidir {
+        args.push("--bidir".into());
+    } else if cfg.reverse {
         args.push("-R".into());
     }
     if cfg.udp {
         args.push("-u".into());
-        // En UDP iperf3 limita a 1 Mbit/s por defecto; lo soltamos para medir.
+    }
+    // Bitrate: valor explícito si se indica. En UDP iperf3 limita a 1 Mbit/s
+    // por defecto, así que sin valor forzamos `-b 0` para medir el máximo.
+    let bitrate = cfg.bitrate.trim();
+    if !bitrate.is_empty() {
+        args.push("-b".into());
+        args.push(bitrate.to_string());
+    } else if cfg.udp {
         args.push("-b".into());
         args.push("0".into());
+    }
+    if cfg.omit > 0 {
+        args.push("-O".into());
+        args.push(cfg.omit.to_string());
+    }
+    match cfg.ip_version {
+        IpVersion::Auto => {}
+        IpVersion::V4 => args.push("-4".into()),
+        IpVersion::V6 => args.push("-6".into()),
+    }
+    let bind = cfg.bind.trim();
+    if !bind.is_empty() {
+        args.push("-B".into());
+        args.push(bind.to_string());
+    }
+    let window = cfg.window.trim();
+    if !window.is_empty() {
+        args.push("-w".into());
+        args.push(window.to_string());
+    }
+    let length = cfg.length.trim();
+    if !length.is_empty() {
+        args.push("-l".into());
+        args.push(length.to_string());
+    }
+    if cfg.mss > 0 {
+        args.push("-M".into());
+        args.push(cfg.mss.to_string());
+    }
+    let congestion = cfg.congestion.trim();
+    if !congestion.is_empty() {
+        args.push("-C".into());
+        args.push(congestion.to_string());
+    }
+    if cfg.no_delay {
+        args.push("-N".into());
+    }
+    if cfg.zerocopy {
+        args.push("-Z".into());
     }
     spawn(args, false)
 }
 
 /// Launches iperf3 in server mode. Returns the session and an event receiver.
 pub fn run_server(cfg: ServerConfig) -> (Session, async_channel::Receiver<Event>) {
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "-s".into(),
         "-p".into(),
         cfg.port.to_string(),
@@ -114,6 +199,14 @@ pub fn run_server(cfg: ServerConfig) -> (Session, async_channel::Receiver<Event>
         "1".into(),
         "--forceflush".into(),
     ];
+    let bind = cfg.bind.trim();
+    if !bind.is_empty() {
+        args.push("-B".into());
+        args.push(bind.to_string());
+    }
+    if cfg.one_off {
+        args.push("-1".into());
+    }
     spawn(args, true)
 }
 

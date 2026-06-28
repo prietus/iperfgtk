@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::iperf::{self, ClientConfig, Event, ServerConfig, Session};
+use crate::iperf::{self, ClientConfig, Event, IpVersion, ServerConfig, Session};
 use crate::vumeter::{format_speed, VuMeter};
 
 pub fn build_window(app: &adw::Application) -> adw::ApplicationWindow {
@@ -57,6 +57,11 @@ fn spin_row(title: &str, min: f64, max: f64, step: f64, value: f64) -> adw::Spin
     row
 }
 
+/// Creates a text entry row (AdwEntryRow), optionally with a subtitle hint.
+fn entry_row(title: &str) -> adw::EntryRow {
+    adw::EntryRow::builder().title(title).build()
+}
+
 fn build_client_page() -> gtk::Widget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.set_margin_top(16);
@@ -64,7 +69,7 @@ fn build_client_page() -> gtk::Widget {
     root.set_margin_start(16);
     root.set_margin_end(16);
 
-    // --- Form ---
+    // --- Connection ---
     let group = adw::PreferencesGroup::new();
     group.set_title("Connection");
 
@@ -72,23 +77,84 @@ fn build_client_page() -> gtk::Widget {
     host_row.set_text("127.0.0.1");
     let port_row = spin_row("Port", 1.0, 65535.0, 1.0, 5201.0);
     let dur_row = spin_row("Duration (s)", 1.0, 86400.0, 1.0, 10.0);
+
+    group.add(&host_row);
+    group.add(&port_row);
+    group.add(&dur_row);
+    root.append(&group);
+
+    // --- Test options ---
+    let test_group = adw::PreferencesGroup::new();
+    test_group.set_title("Test");
+
     let par_row = spin_row("Parallel streams", 1.0, 128.0, 1.0, 1.0);
     let rev_row = adw::SwitchRow::builder()
         .title("Download mode (reverse)")
         .subtitle("Server sends to this machine")
         .build();
+    let bidir_row = adw::SwitchRow::builder()
+        .title("Bidirectional")
+        .subtitle("Measure both directions at once (overrides reverse)")
+        .build();
     let udp_row = adw::SwitchRow::builder()
         .title("UDP")
         .subtitle("Use UDP instead of TCP")
         .build();
+    let bitrate_row = entry_row("Target bitrate");
+    // EntryRow doesn't take subtitles; use placeholder-style hint via text.
+    bitrate_row.set_tooltip_text(Some(
+        "e.g. 100M, 1G. Empty = unlimited (TCP). UDP defaults to unlimited.",
+    ));
+    let omit_row = spin_row("Omit first seconds", 0.0, 60.0, 1.0, 0.0);
 
-    group.add(&host_row);
-    group.add(&port_row);
-    group.add(&dur_row);
-    group.add(&par_row);
-    group.add(&rev_row);
-    group.add(&udp_row);
-    root.append(&group);
+    test_group.add(&par_row);
+    test_group.add(&rev_row);
+    test_group.add(&bidir_row);
+    test_group.add(&udp_row);
+    test_group.add(&bitrate_row);
+    test_group.add(&omit_row);
+    root.append(&test_group);
+
+    // --- Advanced (collapsible) ---
+    let adv_group = adw::PreferencesGroup::new();
+    let advanced = adw::ExpanderRow::builder()
+        .title("Advanced options")
+        .subtitle("Binding, buffers, TCP tuning")
+        .build();
+
+    let ip_row = adw::ComboRow::new();
+    ip_row.set_title("IP version");
+    let ip_model = gtk::StringList::new(&["Automatic", "IPv4 only", "IPv6 only"]);
+    ip_row.set_model(Some(&ip_model));
+
+    let bind_row = entry_row("Bind to local address");
+    bind_row.set_tooltip_text(Some("Local interface/address to bind (-B)"));
+    let window_row = entry_row("TCP window / socket buffer");
+    window_row.set_tooltip_text(Some("e.g. 256K (-w)"));
+    let length_row = entry_row("Buffer length");
+    length_row.set_tooltip_text(Some("Read/write buffer size, e.g. 128K (-l)"));
+    let mss_row = spin_row("Max segment size (MSS)", 0.0, 9000.0, 1.0, 0.0);
+    let cong_row = entry_row("Congestion algorithm");
+    cong_row.set_tooltip_text(Some("TCP only, e.g. cubic, bbr (-C)"));
+    let nodelay_row = adw::SwitchRow::builder()
+        .title("No delay")
+        .subtitle("Disable Nagle's algorithm (-N)")
+        .build();
+    let zerocopy_row = adw::SwitchRow::builder()
+        .title("Zero-copy")
+        .subtitle("Use a zero-copy send method (-Z)")
+        .build();
+
+    advanced.add_row(&ip_row);
+    advanced.add_row(&bind_row);
+    advanced.add_row(&window_row);
+    advanced.add_row(&length_row);
+    advanced.add_row(&mss_row);
+    advanced.add_row(&cong_row);
+    advanced.add_row(&nodelay_row);
+    advanced.add_row(&zerocopy_row);
+    adv_group.add(&advanced);
+    root.append(&adv_group);
 
     // --- VU-meter ---
     let vu = VuMeter::new();
@@ -124,7 +190,18 @@ fn build_client_page() -> gtk::Widget {
         let dur_row = dur_row.clone();
         let par_row = par_row.clone();
         let rev_row = rev_row.clone();
+        let bidir_row = bidir_row.clone();
         let udp_row = udp_row.clone();
+        let bitrate_row = bitrate_row.clone();
+        let omit_row = omit_row.clone();
+        let ip_row = ip_row.clone();
+        let bind_row = bind_row.clone();
+        let window_row = window_row.clone();
+        let length_row = length_row.clone();
+        let mss_row = mss_row.clone();
+        let cong_row = cong_row.clone();
+        let nodelay_row = nodelay_row.clone();
+        let zerocopy_row = zerocopy_row.clone();
         move |_btn: &gtk::Button| {
             // Already running? → stop.
             if session.borrow().is_some() {
@@ -139,13 +216,29 @@ fn build_client_page() -> gtk::Widget {
                 return;
             }
 
+            let ip_version = match ip_row.selected() {
+                1 => IpVersion::V4,
+                2 => IpVersion::V6,
+                _ => IpVersion::Auto,
+            };
             let cfg = ClientConfig {
                 host: host_row.text().trim().to_string(),
                 port: port_row.value() as u16,
                 duration: dur_row.value() as u32,
                 parallel: par_row.value() as u32,
                 reverse: rev_row.is_active(),
+                bidir: bidir_row.is_active(),
                 udp: udp_row.is_active(),
+                bitrate: bitrate_row.text().trim().to_string(),
+                omit: omit_row.value() as u32,
+                ip_version,
+                bind: bind_row.text().trim().to_string(),
+                window: window_row.text().trim().to_string(),
+                length: length_row.text().trim().to_string(),
+                mss: mss_row.value() as u32,
+                congestion: cong_row.text().trim().to_string(),
+                no_delay: nodelay_row.is_active(),
+                zerocopy: zerocopy_row.is_active(),
             };
             if cfg.host.is_empty() {
                 status.set_text("Specify a server (host or IP).");
@@ -185,7 +278,15 @@ fn build_server_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::new();
     group.set_title("Server");
     let port_row = spin_row("Listen port", 1.0, 65535.0, 1.0, 5201.0);
+    let bind_row = entry_row("Bind to local address");
+    bind_row.set_tooltip_text(Some("Local interface/address to listen on (-B)"));
+    let oneoff_row = adw::SwitchRow::builder()
+        .title("One-off")
+        .subtitle("Serve a single client then exit (-1)")
+        .build();
     group.add(&port_row);
+    group.add(&bind_row);
+    group.add(&oneoff_row);
     root.append(&group);
 
     let vu = VuMeter::new();
@@ -215,6 +316,8 @@ fn build_server_page() -> gtk::Widget {
         let start_btn = start_btn.clone();
         let status = status.clone();
         let port_row = port_row.clone();
+        let bind_row = bind_row.clone();
+        let oneoff_row = oneoff_row.clone();
         move |_btn: &gtk::Button| {
             if session.borrow().is_some() {
                 if let Some(s) = session.borrow_mut().take() {
@@ -230,6 +333,8 @@ fn build_server_page() -> gtk::Widget {
 
             let cfg = ServerConfig {
                 port: port_row.value() as u16,
+                bind: bind_row.text().trim().to_string(),
+                one_off: oneoff_row.is_active(),
             };
             vu.reset();
             let (sess, rx) = iperf::run_server(cfg);

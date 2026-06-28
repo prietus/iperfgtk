@@ -17,8 +17,14 @@ need `iperf3` installed.
   same VU-meter.
 - Native **libadwaita** interface: header with a view switcher, modern
   preference rows, automatic light/dark system theme support.
-- Options: host/port, duration, parallel streams (`-P`), download mode
-  (`-R`/reverse), and UDP (`-u`).
+- Full set of iperf3 options, grouped by category:
+  - **Connection:** host, port, duration.
+  - **Test:** parallel streams (`-P`), download/reverse (`-R`), bidirectional
+    (`--bidir`), UDP (`-u`), target bitrate (`-b`), omit first seconds (`-O`).
+  - **Advanced (client):** IP version (`-4`/`-6`), bind address (`-B`), TCP
+    window/socket buffer (`-w`), buffer length (`-l`), MSS (`-M`), congestion
+    algorithm (`-C`), no-delay (`-N`), zero-copy (`-Z`).
+  - **Server:** listen port, bind address (`-B`), one-off mode (`-1`).
 
 ## Requirements
 
