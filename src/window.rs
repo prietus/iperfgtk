@@ -411,8 +411,10 @@ fn spawn_event_loop(
                 Event::Interval { mbps } => {
                     vu.set_target(mbps);
                     if !is_server {
-                        let (v, u) = format_speed(mbps);
-                        status.set_text(&format!("Measuring… {v} {u}"));
+                        // Mostramos el pico (la marca roja), coherente con la
+                        // lectura grande de la esfera.
+                        let (v, u) = format_speed(vu.peak());
+                        status.set_text(&format!("Measuring… peak {v} {u}"));
                     }
                 }
                 Event::Summary {

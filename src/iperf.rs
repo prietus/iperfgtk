@@ -313,29 +313,61 @@ fn spawn(args: Vec<String>, is_server: bool) -> (Session, async_channel::Receive
 }
 
 /// Máquina de estados que convierte líneas de texto de iperf3 en `Event`s.
+///
+/// Cada intervalo de iperf3 puede producir varias líneas: una por flujo
+/// (`[  N]`) más una agregada `[SUM]`, y en modo `--bidir` se duplican porque
+/// hay un sentido de subida (TX) y otro de bajada (RX). Para que la aguja
+/// muestre **una** cifra coherente por intervalo acumulamos por rango temporal
+/// (p.ej. `0.00-1.00`):
+/// - dentro de un intervalo, la línea `[SUM]` *sustituye* a las individuales
+///   (no se suman, para no contar doble);
+/// - los dos sentidos de `--bidir` (TX + RX) sí se *suman* → caudal total.
 struct OutputParser {
     is_server: bool,
-    /// Se activa al ver la primera línea `[SUM]` de la sesión. A partir de ahí
-    /// preferimos esas líneas agregadas e ignoramos las individuales para no
-    /// contar doble. Si nunca aparece (cliente de un solo flujo), usamos las
-    /// líneas individuales. Se reinicia con cada nueva conexión en el servidor.
-    seen_sum: bool,
     /// (Servidor) si ya hay un cliente en curso.
     client_active: bool,
-    /// Mejor estimación del resumen (envío/recepción) para emitir al final.
+
+    // --- Acumulación del intervalo en vivo en curso ---
+    /// Rango temporal del intervalo que estamos acumulando (p.ej. "0.00-1.00").
+    accum_range: Option<String>,
+    /// Caudal acumulado del intervalo actual (Mbit/s).
+    accum_val: f64,
+    /// Si el valor acumulado proviene ya de una línea `[SUM]` (entonces las
+    /// individuales del mismo intervalo se ignoran).
+    accum_uses_sum: bool,
+
+    // --- Resumen final ---
     pending_sender: Option<f64>,
     pending_receiver: Option<f64>,
+    /// Si el `sender`/`receiver` provisional viene de una línea `[SUM]`.
+    sender_from_sum: bool,
+    receiver_from_sum: bool,
 }
 
 impl OutputParser {
     fn new(is_server: bool) -> Self {
         Self {
             is_server,
-            seen_sum: false,
             client_active: false,
+            accum_range: None,
+            accum_val: 0.0,
+            accum_uses_sum: false,
             pending_sender: None,
             pending_receiver: None,
+            sender_from_sum: false,
+            receiver_from_sum: false,
         }
+    }
+
+    /// Reinicia el estado acumulado (nueva conexión en el servidor).
+    fn reset_accum(&mut self) {
+        self.accum_range = None;
+        self.accum_val = 0.0;
+        self.accum_uses_sum = false;
+        self.pending_sender = None;
+        self.pending_receiver = None;
+        self.sender_from_sum = false;
+        self.receiver_from_sum = false;
     }
 
     fn feed(&mut self, line: &str) -> Vec<Event> {
@@ -353,9 +385,7 @@ impl OutputParser {
                     .trim()
                     .to_string();
                 self.client_active = true;
-                self.seen_sum = false;
-                self.pending_sender = None;
-                self.pending_receiver = None;
+                self.reset_accum();
                 out.push(Event::ClientConnected { peer });
                 return out;
             }
@@ -369,51 +399,89 @@ impl OutputParser {
             }
         }
 
-        let is_summary = line.contains("sender") || line.contains("receiver");
-        let is_sum_line = line.contains("[SUM]");
-        if is_sum_line {
-            self.seen_sum = true;
-        }
-
-        // ¿Es una línea de medición que queremos parsear? Preferimos `[SUM]`
-        // cuando la sesión la usa; si no, las líneas individuales `[  N]`.
-        let parse_this = if is_sum_line {
-            true
-        } else {
-            line.trim_start().starts_with('[') && !line.contains("[ ID]") && !self.seen_sum
-        };
-
-        if !parse_this {
+        // Solo nos interesan las filas de medición: empiezan por '[' y no son
+        // la cabecera "[ ID]".
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('[') || line.contains("[ ID]") {
             return out;
         }
-
         let Some(mbps) = parse_bandwidth_mbps(line) else {
             return out;
         };
 
+        let is_summary = line.contains("sender") || line.contains("receiver");
+        let is_sum_line = line.contains("[SUM]");
+
         if is_summary {
-            if line.contains("sender") {
+            // Para el resumen preferimos las líneas `[SUM]`; en `--bidir`,
+            // "sender" = subida total y "receiver" = bajada total.
+            if line.contains("sender") && (is_sum_line || !self.sender_from_sum) {
                 self.pending_sender = Some(mbps);
+                if is_sum_line {
+                    self.sender_from_sum = true;
+                }
             }
             if line.contains("receiver") {
-                self.pending_receiver = Some(mbps);
-                // The "receiver" is the last line of the summary → emit it.
+                if is_sum_line || !self.receiver_from_sum {
+                    self.pending_receiver = Some(mbps);
+                    if is_sum_line {
+                        self.receiver_from_sum = true;
+                    }
+                }
+                // Emitimos (o refrescamos) el resumen; la última línea —la
+                // agregada `[SUM]`— deja los valores definitivos.
                 out.push(Event::Summary {
-                    sender_mbps: self.pending_sender.unwrap_or(mbps),
-                    receiver_mbps: mbps,
+                    sender_mbps: self.pending_sender.unwrap_or(0.0),
+                    receiver_mbps: self.pending_receiver.unwrap_or(mbps),
                 });
                 if self.is_server && self.client_active {
                     self.client_active = false;
                     out.push(Event::ClientDisconnected);
                 }
             }
-        } else {
-            // Intervalo en vivo → alimenta la aguja.
-            out.push(Event::Interval { mbps });
+            return out;
         }
 
+        // --- Intervalo en vivo ---
+        let range = range_token(line).map(str::to_string);
+
+        if self.accum_range != range {
+            // Comienza un intervalo nuevo.
+            self.accum_range = range;
+            self.accum_uses_sum = is_sum_line;
+            self.accum_val = mbps;
+        } else if is_sum_line && !self.accum_uses_sum {
+            // Primera `[SUM]` del intervalo: sustituye a las individuales.
+            self.accum_uses_sum = true;
+            self.accum_val = mbps;
+        } else if is_sum_line {
+            // Segunda `[SUM]` (otro sentido en `--bidir`): se suma.
+            self.accum_val += mbps;
+        } else if !self.accum_uses_sum {
+            // Otra individual antes de ver el `[SUM]` (otro flujo, u otro
+            // sentido en bidir sin múltiples flujos): se suma.
+            self.accum_val += mbps;
+        } else {
+            // Individual después de un `[SUM]`: ya contabilizada, se ignora.
+            return out;
+        }
+
+        out.push(Event::Interval {
+            mbps: self.accum_val,
+        });
         out
     }
+}
+
+/// Extrae el rango temporal de una línea de iperf3 (el token anterior a "sec"),
+/// p.ej. `"0.00-1.00"`. Sirve para agrupar todas las líneas de un intervalo.
+fn range_token(line: &str) -> Option<&str> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let i = parts.iter().position(|t| *t == "sec")?;
+    if i == 0 {
+        return None;
+    }
+    Some(parts[i - 1])
 }
 
 /// Extracts throughput in Mbit/s from an iperf3 line.
@@ -479,15 +547,36 @@ mod tests {
     }
 
     #[test]
-    fn multi_flujo_prefiere_sum() {
+    fn multi_flujo_sum_sustituye_individuales() {
         let mut p = OutputParser::new(true);
         p.feed("Accepted connection from 10.0.0.2, port 1");
-        // Línea individual antes de ver [SUM]: se emite (blip inicial aceptable).
+        // Dos flujos individuales del mismo intervalo: se acumulan provisionalmente.
         let _ = p.feed("[  5]   0.00-1.00   sec  1.0 GBytes  8.0 Gbits/sec");
-        // Tras ver [SUM], las individuales se ignoran.
+        let _ = p.feed("[  7]   0.00-1.00   sec  1.0 GBytes  8.0 Gbits/sec");
+        // La línea [SUM] del intervalo *sustituye* (no suma) → 16, no 16+individuales.
         let sum = p.feed("[SUM]   0.00-1.00   sec  2.0 GBytes  16.0 Gbits/sec");
-        assert!(matches!(&sum[0], Event::Interval { mbps } if (*mbps - 16000.0).abs() < 1.0));
-        let ind = p.feed("[  5]   1.00-2.00   sec  1.0 GBytes  8.0 Gbits/sec");
+        assert!(matches!(sum.last().unwrap(), Event::Interval { mbps } if (*mbps - 16000.0).abs() < 1.0));
+        // Una individual posterior al [SUM] del mismo intervalo se ignora.
+        let ind = p.feed("[  5]   0.00-1.00   sec  1.0 GBytes  8.0 Gbits/sec");
         assert!(ind.is_empty());
+    }
+
+    #[test]
+    fn bidir_multiflujo_suma_ambos_sentidos() {
+        let mut p = OutputParser::new(false); // cliente en --bidir
+        // Intervalo 0-1: individual TX, luego [SUM] TX (sustituye), luego [SUM] RX (suma).
+        let _ = p.feed("[  5][TX-C]   0.00-1.00   sec  1.0 GBytes  8.0 Gbits/sec");
+        let _ = p.feed("[SUM][TX-C]   0.00-1.00   sec  1.0 GBytes  8.0 Gbits/sec");
+        let rx = p.feed("[SUM][RX-C]   0.00-1.00   sec  0.75 GBytes  6.0 Gbits/sec");
+        // Total = TX (8) + RX (6) = 14 Gbit/s.
+        assert!(matches!(rx.last().unwrap(), Event::Interval { mbps } if (*mbps - 14000.0).abs() < 1.0));
+    }
+
+    #[test]
+    fn bidir_un_flujo_suma_tx_y_rx() {
+        let mut p = OutputParser::new(false); // cliente --bidir, un solo flujo (sin [SUM])
+        let _ = p.feed("[  5][TX-C]   0.00-1.00   sec  1.0 GBytes  8.0 Gbits/sec");
+        let rx = p.feed("[  7][RX-C]   0.00-1.00   sec  0.75 GBytes  6.0 Gbits/sec");
+        assert!(matches!(rx.last().unwrap(), Event::Interval { mbps } if (*mbps - 14000.0).abs() < 1.0));
     }
 }

@@ -117,6 +117,11 @@ impl VuMeter {
         &self.area
     }
 
+    /// Retained peak (Mbit/s) — the value shown by the red marker / readout.
+    pub fn peak(&self) -> f64 {
+        self.state.borrow().peak
+    }
+
     /// Sets a new target throughput (Mbit/s).
     pub fn set_target(&self, mbps: f64) {
         let mut st = self.state.borrow_mut();
@@ -264,8 +269,10 @@ fn draw_gauge(_area: &gtk::DrawingArea, cr: &cairo::Context, w: f64, h: f64, st:
     cr.arc(cx, cy, (radius * 0.06).clamp(5.0, 11.0), 0.0, 2.0 * PI);
     let _ = cr.fill();
 
-    // 6) Lectura digital central.
-    let (val_txt, unit_txt) = format_speed(st.displayed);
+    // 6) Lectura digital central. Mostramos el PICO retenido (la marca roja):
+    // en enlaces a ráfagas el valor instantáneo de la aguja fluctúa mucho y
+    // suele quedarse corto, así que la cifra "de resultado" es el máximo.
+    let (val_txt, unit_txt) = format_speed(st.peak);
     cr.set_source_rgb(fg.0, fg.1, fg.2);
     let big = (radius * 0.30).clamp(18.0, 44.0);
     cr.set_font_size(big);
